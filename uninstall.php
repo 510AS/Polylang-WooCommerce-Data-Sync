@@ -23,7 +23,7 @@ function polylang_wc_sync_cleanup() {
     delete_option('polylang_wc_sync_version');
     delete_option('polylang_wc_sync_settings');
     
-    // Remove sync conflict records from custom table if exists
+    // Drop sync conflicts table
     $table_name = $wpdb->prefix . 'polylang_wc_sync_conflicts';
     if ($wpdb->get_var("SHOW TABLES LIKE '$table_name'") === $table_name) {
         $wpdb->query("DROP TABLE IF EXISTS $table_name");
@@ -36,6 +36,12 @@ function polylang_wc_sync_cleanup() {
     $wpdb->query(
         "DELETE FROM {$wpdb->usermeta} 
         WHERE meta_key LIKE 'polylang_wc_sync_%'"
+    );
+    
+    // Remove product meta timestamps
+    $wpdb->query(
+        "DELETE FROM {$wpdb->postmeta} 
+        WHERE meta_key = '_polylang_wc_sync_timestamp'"
     );
 }
 

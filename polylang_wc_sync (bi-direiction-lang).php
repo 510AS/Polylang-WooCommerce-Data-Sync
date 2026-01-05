@@ -19,6 +19,79 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+// Define plugin constants
+define('POLYLANG_WC_SYNC_VERSION', '1.0.0');
+define('POLYLANG_WC_SYNC_PLUGIN_FILE', __FILE__);
+define('POLYLANG_WC_SYNC_PLUGIN_DIR', plugin_dir_path(__FILE__));
+
+// Include admin page file
+require_once(POLYLANG_WC_SYNC_PLUGIN_DIR . 'includes/admin-page.php');
+
+/**
+ * Plugin activation hook - Create database table for conflicts
+ */
+function polylang_wc_sync_activate() {
+    global $wpdb;
+    
+    $table_name = $wpdb->prefix . 'polylang_wc_sync_conflicts';
+    $charset_collate = $wpdb->get_charset_collate();
+    
+    // Check if table already exists
+    if ($wpdb->get_var("SHOW TABLES LIKE '$table_name'") === $table_name) {
+        return;
+    }
+    
+    // Create conflicts table
+    $sql = "CREATE TABLE $table_name (
+        id mediumint(9) NOT NULL AUTO_INCREMENT,
+        timestamp datetime DEFAULT CURRENT_TIMESTAMP NOT NULL,
+        source_id mediumint(9) NOT NULL,
+        source_lang varchar(10) NOT NULL,
+        target_id mediumint(9) NOT NULL,
+        target_lang varchar(10) NOT NULL,
+        source_title varchar(255) NOT NULL,
+        status varchar(20) DEFAULT 'unresolved',
+        notes longtext,
+        PRIMARY KEY (id),
+        KEY source_id (source_id),
+        KEY target_id (target_id),
+        KEY timestamp (timestamp),
+        KEY status (status)
+    ) $charset_collate;";
+    
+    require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+    dbDelta($sql);
+}
+register_activation_hook(POLYLANG_WC_SYNC_PLUGIN_FILE, 'polylang_wc_sync_activate');
+
+/**
+ * Error logging function for debugging
+ * 
+ * @param string $message Log message
+ * @param array $data Additional data to log
+ * @param string $level Log level (info, warning, error)
+ */
+function polylang_wc_sync_log($message, $data = [], $level = 'info') {
+    // Only log if WP_DEBUG is enabled
+    if (!defined('WP_DEBUG') || !WP_DEBUG) {
+        return;
+    }
+    
+    $log_entry = sprintf(
+        '[%s] [%s] %s',
+        current_time('Y-m-d H:i:s'),
+        strtoupper($level),
+        $message
+    );
+    
+    if (!empty($data)) {
+        $log_entry .= ' | Data: ' . wp_json_encode($data);
+    }
+    
+    // Log to WordPress debug.log
+    error_log($log_entry);
+}
+
 /**
  * Check if required plugins are active
  */
@@ -231,6 +304,7 @@ class Polylang_WooCommerce_Sync {
         // AJAX handlers for bulk sync
         add_action('wp_ajax_polylang_wc_get_products', [$this, 'ajax_get_products']);
         add_action('wp_ajax_polylang_wc_sync_product', [$this, 'ajax_sync_product']);
+        add_action('wp_ajax_polylang_wc_get_conflicts', [$this, 'ajax_get_conflicts']);
     }
     
     /**
@@ -388,23 +462,39 @@ class Polylang_WooCommerce_Sync {
      * @param int $target_id Target product ID
      */
     private function log_sync_conflict($source_id, $target_id) {
-        $conflicts = get_option('polylang_wc_sync_conflicts', []);
+        global $wpdb;
         
-        $conflicts[] = [
-            'timestamp' => current_time('mysql'),
-            'source_id' => $source_id,
-            'source_lang' => pll_get_post_language($source_id),
-            'target_id' => $target_id,
-            'target_lang' => pll_get_post_language($target_id),
-            'source_title' => get_the_title($source_id),
-        ];
+        $source_lang = pll_get_post_language($source_id);
+        $target_lang = pll_get_post_language($target_id);
+        $source_title = get_the_title($source_id);
         
-        // Keep only last 50 conflicts
-        if (count($conflicts) > 50) {
-            $conflicts = array_slice($conflicts, -50);
-        }
+        // Log to error log for debugging
+        polylang_wc_sync_log(
+            'Sync conflict detected',
+            [
+                'source_id' => $source_id,
+                'target_id' => $target_id,
+                'source_lang' => $source_lang,
+                'target_lang' => $target_lang,
+            ],
+            'warning'
+        );
         
-        update_option('polylang_wc_sync_conflicts', $conflicts);
+        // Insert into database table
+        $table_name = $wpdb->prefix . 'polylang_wc_sync_conflicts';
+        
+        $wpdb->insert(
+            $table_name,
+            [
+                'source_id' => $source_id,
+                'source_lang' => $source_lang,
+                'target_id' => $target_id,
+                'target_lang' => $target_lang,
+                'source_title' => $source_title,
+                'status' => 'unresolved',
+            ],
+            ['%d', '%s', '%d', '%s', '%s', '%s']
+        );
     }
     
     /**
@@ -1526,7 +1616,9 @@ class Polylang_WooCommerce_Sync {
             'Sync Translations',
             'manage_options',
             'polylang-wc-sync',
-            [$this, 'render_admin_page']
+            function() {
+                polylang_wc_sync_render_admin_page();
+            }
         );
     }
     
@@ -1747,5 +1839,27 @@ class Polylang_WooCommerce_Sync {
         $this->sync_product_data($product_id);
         
         wp_send_json_success(['message' => 'Product synced successfully']);
+    }
+    
+    /**
+     * AJAX: Get sync conflicts from database
+     */
+    public function ajax_get_conflicts() {
+        check_ajax_referer('polylang_wc_sync', 'nonce');
+        
+        if (!current_user_can('manage_options')) {
+            wp_send_json_error(['message' => 'Insufficient permissions']);
+        }
+        
+        global $wpdb;
+        $table_name = $wpdb->prefix . 'polylang_wc_sync_conflicts';
+        
+        // Get recent conflicts (last 100)
+        $conflicts = $wpdb->get_results(
+            "SELECT * FROM $table_name ORDER BY timestamp DESC LIMIT 100",
+            ARRAY_A
+        );
+        
+        wp_send_json_success(['conflicts' => $conflicts ?: []]);
     }
 }
